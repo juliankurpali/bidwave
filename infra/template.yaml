@@ -1,0 +1,422 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  BidWave always-on stack — Java 17 Lambdas, DynamoDB Lots+BidHistory,
+  SQS FIFO+DLQ, REST API with API key on POST /bids, CloudFront+S3 (OAC),
+  CloudWatch alarms/dashboard, X-Ray.
+
+Globals:
+  Function:
+    Runtime: java17
+    Architectures:
+      - x86_64
+    Timeout: 30
+    MemorySize: 512
+    Tracing: Active
+    Environment:
+      Variables:
+        LOTS_TABLE: !Ref LotsTable
+        HISTORY_TABLE: !Ref BidHistoryTable
+        BID_QUEUE_URL: !Ref BidQueue
+    Tags:
+      Project: BidWave
+      CostCenter: demo-budget
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: bidwave
+  ApiThrottleRate:
+    Type: Number
+    Default: 10
+  ApiThrottleBurst:
+    Type: Number
+    Default: 20
+  TickerAlbDnsName:
+    Type: String
+    Default: ''
+    Description: >
+      Demo-hour ALB DNS (no https://). When set, CloudFront serves /ticker/* from the ALB
+      so the HTTPS UI can poll the ticker without mixed-content. Clear and redeploy after teardown.
+
+Conditions:
+  HasTickerOrigin: !Not [!Equals [!Ref TickerAlbDnsName, '']]
+
+Resources:
+  LotsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-Lots'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: lotId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: lotId
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: BidWave
+
+  BidHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-BidHistory'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: lotId
+          AttributeType: S
+        - AttributeName: bidId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: lotId
+          KeyType: HASH
+        - AttributeName: bidId
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: BidWave
+
+  BidDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-bids-dlq.fifo'
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      MessageRetentionPeriod: 1209600
+
+  BidQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-bids.fifo'
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BidDLQ.Arn
+        maxReceiveCount: 3
+
+  PlaceBidFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-PlaceBid'
+      Handler: com.bidwave.api.PlaceBidHandler::handleRequest
+      CodeUri: ../target/bidwave-1.0.0.jar
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt BidQueue.QueueName
+      Events:
+        PlaceBid:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /bids
+            Method: POST
+            Auth:
+              ApiKeyRequired: true
+
+  ListLotsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-ListLots'
+      Handler: com.bidwave.api.ListLotsHandler::handleRequest
+      CodeUri: ../target/bidwave-1.0.0.jar
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref LotsTable
+      Events:
+        ListLots:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /lots
+            Method: GET
+
+  GetLotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-GetLot'
+      Handler: com.bidwave.api.GetLotHandler::handleRequest
+      CodeUri: ../target/bidwave-1.0.0.jar
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref LotsTable
+      Events:
+        GetLot:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /lots/{id}
+            Method: GET
+
+  ListLotBidsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-ListLotBids'
+      Handler: com.bidwave.api.ListLotBidsHandler::handleRequest
+      CodeUri: ../target/bidwave-1.0.0.jar
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref LotsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref BidHistoryTable
+      Events:
+        ListLotBids:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /lots/{id}/bids
+            Method: GET
+
+  SettleBidFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-SettleBid'
+      Handler: com.bidwave.worker.SettleBidHandler::handleRequest
+      CodeUri: ../target/bidwave-1.0.0.jar
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LotsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BidHistoryTable
+      Events:
+        BidQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt BidQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${ProjectName}-api'
+      StageName: prod
+      TracingEnabled: true
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowMethods: "'GET,POST,OPTIONS'"
+      Auth:
+        ApiKeyRequired: false
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          UsagePlanName: !Sub '${ProjectName}-write-plan'
+          Description: Throttle and API key for BidWave write path
+          Quota:
+            Limit: 10000
+            Period: DAY
+          Throttle:
+            RateLimit: !Ref ApiThrottleRate
+            BurstLimit: !Ref ApiThrottleBurst
+
+  UiBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-ui-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${ProjectName}-ui-oac-${AWS::StackName}'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  UiDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        Origins:
+          - Id: UiS3Origin
+            DomainName: !GetAtt UiBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - !If
+            - HasTickerOrigin
+            - Id: TickerAlbOrigin
+              DomainName: !Ref TickerAlbDnsName
+              CustomOriginConfig:
+                HTTPPort: 80
+                HTTPSPort: 443
+                OriginProtocolPolicy: http-only
+                OriginReadTimeout: 10
+                OriginKeepaliveTimeout: 5
+            - !Ref AWS::NoValue
+        DefaultCacheBehavior:
+          TargetOriginId: UiS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CacheBehaviors: !If
+          - HasTickerOrigin
+          - - PathPattern: ticker/*
+              TargetOriginId: TickerAlbOrigin
+              ViewerProtocolPolicy: redirect-to-https
+              AllowedMethods: [GET, HEAD, OPTIONS]
+              CachedMethods: [GET, HEAD]
+              Compress: true
+              MinTTL: 0
+              DefaultTTL: 0
+              MaxTTL: 0
+              ForwardedValues:
+                QueryString: false
+                Headers:
+                  - Origin
+                Cookies:
+                  Forward: none
+          - !Ref AWS::NoValue
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  UiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UiBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${UiBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${UiDistribution}'
+
+  PlaceBidErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-PlaceBid-Errors'
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PlaceBidFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  SettleBidErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-SettleBid-Errors'
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SettleBidFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DlqDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-BidDLQ-Depth'
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt BidDLQ.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  BidWaveDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-ops'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Errors",
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "${PlaceBidFunction}"],
+                  [".", ".", ".", "${SettleBidFunction}"],
+                  [".", ".", ".", "${GetLotFunction}"]
+                ],
+                "period": 60,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "SQS Visible Messages",
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${BidQueue.QueueName}"],
+                  [".", ".", ".", "${BidDLQ.QueueName}"]
+                ],
+                "period": 60,
+                "stat": "Maximum",
+                "region": "${AWS::Region}"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ApiUrl:
+    Description: REST API base URL (include /prod)
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  CloudFrontUrl:
+    Description: HTTPS UI URL
+    Value: !Sub 'https://${UiDistribution.DomainName}'
+  ApiKeyId:
+    Description: >
+      SAM-generated usage-plan API key ID (logical RestApiApiKey).
+      Fetch the secret value (never commit it):
+      aws apigateway get-api-key --api-key <ApiKeyId> --include-value --query value --output text
+    Value: !Ref RestApiApiKey
+  LotsTableName:
+    Value: !Ref LotsTable
+  BidHistoryTableName:
+    Value: !Ref BidHistoryTable
+  BidQueueUrl:
+    Value: !Ref BidQueue
+  BidDlqUrl:
+    Value: !Ref BidDLQ
+  UiBucketName:
+    Value: !Ref UiBucket
+  CloudFrontDistributionId:
+    Value: !Ref UiDistribution

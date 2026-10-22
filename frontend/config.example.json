@@ -1,0 +1,6 @@
+{
+  "mode": "aws",
+  "apiBaseUrl": "https://YOUR_API_ID.execute-api.REGION.amazonaws.com/prod",
+  "requireApiKey": true,
+  "apiKey": "DO_NOT_COMMIT — paste only into gitignored frontend/config.json after deploy"
+}

@@ -1,0 +1,16 @@
+target/
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.DS_Store
+samconfig.toml
+frontend/config.json
+frontend/config.local.json
+*.pem
+.env
+.env.*
+.aws-sam/
+demo-hour/ticker/target/
+*.log

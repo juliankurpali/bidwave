@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BidWave — Live Auction Floor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <header class="top">
+    <div>
+      <a class="brand" href="/" id="brandHome">BidWave</a>
+      <p class="tagline">Pick a lot. Raise the bid. Watch the floor move.</p>
+    </div>
+    <div class="you" id="youCard">
+      <p class="you-label">You are</p>
+      <p class="you-name" id="youName">…</p>
+      <button type="button" class="linkish" id="reshuffleBtn" title="New random handle">New name</button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section class="floor" aria-label="Live lots">
+      <div class="section-head">
+        <h2>Live lots</h2>
+        <p class="live-tag" id="liveTag">Open</p>
+      </div>
+      <div class="lot-grid" id="lotGrid">
+        <p class="empty-hint" id="emptyHint">Loading auctions…</p>
+      </div>
+    </section>
+
+    <section class="paddle" id="paddle" hidden>
+      <div class="paddle-layout">
+        <div class="paddle-main">
+          <p class="eyebrow">Bidding on</p>
+          <h2 class="lot-title" id="lotTitle">—</h2>
+          <p class="lot-meta" id="lotMeta"></p>
+
+          <div class="high-bid-block">
+            <p class="high-label">Current high</p>
+            <p class="high-amount" id="highAmount">—</p>
+            <p class="high-bidder" id="highBidder">—</p>
+          </div>
+
+          <div class="bidders" aria-live="polite">
+            <div class="section-head tight">
+              <h3>Bidders</h3>
+              <span class="bid-count" id="bidCount">0</span>
+            </div>
+            <ul class="bid-list" id="bidList">
+              <li class="bid-empty">No bids yet — be first.</li>
+            </ul>
+          </div>
+
+          <div class="clock-row">
+            <div>
+              <p class="clock-label">Ends in</p>
+              <p class="clock-value" id="endsIn">—</p>
+            </div>
+            <div>
+              <p class="clock-label">Status</p>
+              <p class="clock-value" id="lotStatus">—</p>
+            </div>
+          </div>
+
+          <div class="quick-bids" id="quickBids" aria-label="Suggest bid amount">
+            <button type="button" data-delta="1" class="chip">+$1</button>
+            <button type="button" data-delta="5" class="chip">+$5</button>
+            <button type="button" data-delta="10" class="chip">+$10</button>
+          </div>
+          <form id="bidForm" class="paddle-form">
+            <label>
+              <span>Your bid (USD)</span>
+              <input id="amount" name="amount" type="number" step="0.01" min="0.01" required />
+            </label>
+            <button type="submit" class="btn-primary" id="placeBtn">Place bid as <span id="placeAs">you</span></button>
+            <button type="button" class="btn-ghost" id="backBtn">← All lots</button>
+          </form>
+
+          <p class="toast" id="toast" role="status" hidden></p>
+        </div>
+
+        <aside class="arch-dock" id="archDock">
+          <div class="arch-dock-head">
+            <div>
+              <p class="arch-dock-title">Under the hood</p>
+              <p class="arch-dock-sub" id="hoodIntro">Fully serverless — CloudFront, API Gateway, Lambda, SQS, DynamoDB</p>
+            </div>
+            <label class="hood-toggle compact">
+              <input type="checkbox" id="hoodToggle" checked />
+              <span>Animate</span>
+            </label>
+          </div>
+          <div class="path-chips" id="pathChips" role="tablist" aria-label="Architecture paths">
+            <button type="button" class="path-chip is-active" data-path="idle">Full map</button>
+            <button type="button" class="path-chip path-chip-live" data-path="live">Live</button>
+            <button type="button" class="path-chip" data-path="placeBid">Place bid</button>
+            <button type="button" class="path-chip" data-path="listLots">List lots</button>
+            <button type="button" class="path-chip" data-path="listBids">List bidders</button>
+          </div>
+          <p class="arch-call" id="archCallLabel">Showing full architecture</p>
+          <div class="arch" id="archViz" aria-label="AWS architecture"></div>
+          <div class="hood-caption">
+            <p class="hood-step-title" id="hoodStepTitle">Architecture</p>
+            <p class="hood-step-desc" id="hoodStepDesc">Background refreshes stay quiet. Place a bid or tap a path chip to animate.</p>
+          </div>
+          <div class="arch-actions">
+            <button type="button" class="btn-ghost hood-replay" id="hoodReplay" disabled>Replay</button>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span id="apiHint">API not configured</span>
+    <details class="diag">
+      <summary>Dev</summary>
+      <pre id="status">…</pre>
+      <label class="dev-key">API key <input id="apiKey" type="password" autocomplete="off" /></label>
+    </details>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

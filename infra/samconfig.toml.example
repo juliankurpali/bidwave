@@ -1,0 +1,24 @@
+# Copy to samconfig.toml and fill in your account values.
+# Never commit real account IDs or profile secrets.
+
+version = 0.1
+
+[default.global.parameters]
+stack_name = "bidwave"
+region = "eu-central-1"          # pick one region and stick to it
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+# profile = "bidwave-dev"        # IAM user profile — not root
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+stack_name = "bidwave"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "ProjectName=bidwave ApiThrottleRate=10 ApiThrottleBurst=20"
+
+[default.delete.parameters]
+stack_name = "bidwave"

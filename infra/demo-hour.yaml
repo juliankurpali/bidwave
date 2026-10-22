@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  BidWave DEMO-HOUR ONLY — ALB + t3.micro Java WebSocket ticker.
+  Create for the presentation, tear down the same session (./demo-hour/teardown.sh).
+  Cost: ALB ~$0.02/hour + EC2 micro. Do NOT leave running overnight.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: bidwave
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Default VPC is fine
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two public subnets in different AZs (ALB requirement)
+  LotsTableName:
+    Type: String
+    Description: Lots table from always-on stack (e.g. bidwave-Lots)
+  TickerJarS3Bucket:
+    Type: String
+    Description: Bucket containing the ticker shaded JAR
+  TickerJarS3Key:
+    Type: String
+    Default: ticker/bidwave-ticker-1.0.0.jar
+  LotId:
+    Type: String
+    Default: lot-mug
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: >
+      Amazon Linux 2023 x86_64 AMI. Resolve with:
+      aws ec2 describe-images --owners amazon --filters Name=name,Values=al2023-ami-2023*-x86_64 Name=state,Values=available
+      --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text
+      (SSM public AMI params need extra IAM; ImageId avoids that.)
+  Ec2InstanceConnectPrefixListId:
+    Type: String
+    Default: pl-03384955215625250
+    Description: >
+      Managed prefix list com.amazonaws.<region>.ec2-instance-connect
+      (eu-central-1 default). Allows TCP/22 from Instance Connect only — not 0.0.0.0/0.
+      Lookup: aws ec2 describe-managed-prefix-lists --filters Name=prefix-list-name,Values=com.amazonaws.REGION.ec2-instance-connect
+
+Resources:
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Internet to ALB :80
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Project
+          Value: BidWave
+        - Key: Lifetime
+          Value: demo-hour
+
+  TickerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB 8080/8081 + Instance Connect SSH (prefix list, not public)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 8081
+          ToPort: 8081
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        # EC2 Instance Connect push-key SSH — scoped to AWS-managed PL, not the internet
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourcePrefixListId: !Ref Ec2InstanceConnectPrefixListId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Project
+          Value: BidWave
+        - Key: Lifetime
+          Value: demo-hour
+
+  TickerInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ticker-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ReadLotsAndJar
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LotsTableName}'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${TickerJarS3Bucket}/${TickerJarS3Key}'
+
+  TickerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref TickerInstanceRole
+
+  TickerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: TickerInstance
+    Properties:
+      Name: !Sub '${ProjectName}-ticker-tg'
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      Targets:
+        - Id: !Ref TickerInstance
+          Port: 8080
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-ticker-alb'
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets: !Ref SubnetIds
+      Tags:
+        - Key: Project
+          Value: BidWave
+        - Key: Lifetime
+          Value: demo-hour
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TickerTargetGroup
+
+  TickerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.micro
+      IamInstanceProfile: !Ref TickerInstanceProfile
+      SecurityGroupIds:
+        - !Ref TickerSecurityGroup
+      SubnetId: !Select [0, !Ref SubnetIds]
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+        HttpEndpoint: enabled
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y java-17-amazon-corretto-headless awscli
+          mkdir -p /opt/bidwave
+          aws s3 cp s3://${TickerJarS3Bucket}/${TickerJarS3Key} /opt/bidwave/ticker.jar
+          cat >/etc/systemd/system/bidwave-ticker.service <<EOF
+          [Unit]
+          Description=BidWave WebSocket ticker
+          After=network.target
+          [Service]
+          Environment=LOTS_TABLE=${LotsTableName}
+          Environment=LOT_ID=${LotId}
+          Environment=AWS_REGION=${AWS::Region}
+          Environment=PORT=8080
+          ExecStart=/usr/bin/java -jar /opt/bidwave/ticker.jar
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable --now bidwave-ticker
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ticker'
+        - Key: Project
+          Value: BidWave
+        - Key: Lifetime
+          Value: demo-hour
+
+Outputs:
+  AlbDnsName:
+    Description: Open ws://<AlbDnsName>/ws for live ticker (HTTP demo only)
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  TickerInstanceId:
+    Value: !Ref TickerInstance
+  Reminder:
+    Value: DESTROY THIS STACK SAME SESSION — ./demo-hour/teardown.sh
